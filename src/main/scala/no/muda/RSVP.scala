@@ -3,32 +3,90 @@ package no.muda
 import unfiltered.request._
 import unfiltered.response._
 
+import org.scalaquery.session._
+import org.scalaquery.session.Database.threadLocalSession
+import org.scalaquery.ql._
+import org.scalaquery.ql.TypeMapper._
+import org.scalaquery.ql.extended.H2Driver.Implicit._
+import org.scalaquery.session.Database
+import org.scalaquery.ql.extended.ExtendedTable
+
+import java.util.Date
+
 case class Logger(logClass:Class[_]) {
   def log(message:String)   { println( logClass.getName + ": " + message ) }
   def debug(message:String) { log(message) }
   def info(message:String)  { log(message) }
 }
-
-case class Event(title: String, date: String, location: String, host: String, description: Option[String])
+case class Attendee(name:String, createdAt:String = new Date().toString)
+case class Event(title: String, date: String, location: String, host: String, description: Option[String], attendees:List[Attendee] = List()) {
+  def segment = title.toLowerCase.replaceAll("[^\\w]+", "-")
+}
 
 /** unfiltered plan */
 class RSVP extends unfiltered.filter.Plan {
   import QParams._
 
+  val Events = new ExtendedTable[(String, String, String, String, String, Option[String])]("EVENTS") {
+    def id = column[String]("ID", O.PrimaryKey)
+    def title = column[String]("TITLE")
+    def location = column[String]("LOCATION")
+    def date = column[String]("DATE")
+    def host = column[String]("HOST")
+    def description = column[String]("DESCRIPTION", O.Nullable)
+    def * = id ~ title ~ location ~ date ~ host ~ description
+  }
+
+  val Attendees = new ExtendedTable[(String, String, String)]("ATTENDEES") {
+    def eventId = column[String]("EVENT_ID")
+    def name = column[String]("NAME")
+    def createdAt = column[String]("CREATED_AT")
+    def * = eventId ~ name ~ createdAt
+  }
+
+  val DB = Database.forURL("jdbc:h2:mem:test1;DB_CLOSE_DELAY=-1", driver = "org.h2.Driver")
+
+  DB.withSession {
+    (Events.ddl ++ Attendees.ddl).create
+    Events.insertAll(
+      ("scalaonaboat",  "ScalaOnABoat",     "2011-fjdskfjdsk", "Boat",     "Arktekk", None),
+      ("into-clojure",  "into {} 'Clojure", "2011-fjdskfjdsk", "Sentrum",  "sociallyfunctional", None),
+      ("javazoen",      "JavaZoen",         "2012-fdjkfjds",   "Spectrum", "javaBin", None)
+    )
+    Attendees.insert("scalaonaboat", "olecr", "2012-sdfdg")
+  }
+
   var events = List[Event](
     Event("ScalaOnABoat", "2011-fjdskfjdsk", "Boat", "Arktekk", None),
-    Event("JavaZoen", "2012-fdjkfjds", "Spectrum", "javaBin", None)
+    Event("into {} 'Clojure", "2011-fjdskfjdsk", "Sentrum", "sociallyfunctional", None),
+    Event("JavaZoen", "2012-fdjkfjds", "Spectrum", "javaBin", None),
+    Event("NDC", "2012-fdjkfjds", "Spectrum", "M$", None)
   )
 
   val logger = Logger(classOf[RSVP])
 
   def intent = {
-    case GET(Path(p @ "/create")) =>
+    case GET(Path(p @ "/event")) =>
       logger.debug("GET %s" format p)
-      Ok ~> layout(<h1>New Event!?</h1> ++ createEventForm(Map.empty))
-    case GET(Path(p)) =>
-      Ok ~> layout(<h1>RSVP!?</h1> ++ showEventList)
-    case POST(Path(p) & Params(params)) =>
+      Ok ~> layout(<h2>New Event!?</h2> ++ createEventForm(Map.empty))
+
+    case GET(Path(Seg("event" :: slug :: Nil))) =>
+      logger.debug("GET /event/" + slug )
+      events.find(e => e.segment == slug) match {
+        case Some(event) => Ok ~> layout(<h2>Showing event!?</h2> ++ showEvent(event))
+        case None        => NotFound ~> layout(<xml:group><h2>Event not Found!</h2><p>Is the URL correct?</p></xml:group>)
+      }
+
+    case GET(Path(Seg("event" :: slug :: "attend" :: attendeeName :: Nil))) =>
+      events = events.map { event =>
+        if (event.segment == slug)
+          event.copy(attendees = Attendee(attendeeName) :: event.attendees)
+        else
+          event
+      }
+      Ok
+
+    case POST(Path(p @ "/event") & Params(params)) =>
       logger.debug("POST %s" format p)
       def viewWithParams(head: xml.NodeSeq) = layout(head ++ createEventForm(params))
       val expected = for {
@@ -54,20 +112,62 @@ class RSVP extends unfiltered.filter.Plan {
         description <- lookup("eventDescription")
 
       } yield {
-        events ::= Event(title.get, date.get, location.get, host.get, description)
-        viewWithParams(<div class="notice">Yup. { title.get } is a title and { date.get } is a date. </div>)
+        val event = Event(title.get, date.get, location.get, host.get, description)
+        events ::= event
+        Redirect("/event/" + event.segment)
       }
       expected(params) orFail { fails =>
         viewWithParams(<ul class="error"> { fails.map { f => <li>{f.error}</li> } } </ul>)
       }
+
+    case GET(Path(p)) =>
+      Ok ~> layout(<h2>Proud to present…</h2> ++ showEventList)
   }
 
   def validDate(s: String) = s matches """\d{4}-\d{2}-\d{2} \d{2}:\d{2}"""
-  def palindrome(s: String) = s.toLowerCase.reverse == s.toLowerCase
 
   def showEventList = {
-    <ul>
+    <ul>{
+      DB.withSession {
+        val query: Query[Projection2[String, String]] = for {
+          e <- Events
+        } yield e.id ~ e.title
+
+        for (e <- query.list) yield {
+            <li>
+              <a href={"/event/" + e._1}>
+                {e._2}
+              </a>
+            </li>
+        }
+      }
+    }
     </ul>
+  }
+
+  def showEvent(event:Event) = {
+    <div class="event">
+      <h2>{event.title}</h2>
+      <span class="date">{event.date}</span>
+      <span class="location">{event.location}</span>
+      <span class="host">{event.host}</span>
+      <p>{event.description.getOrElse("No description yet…")}</p>
+      <ul class="attendees">
+        {event.attendees.map { a => <li>{a.name} @ {a.createdAt}</li> }}
+      </ul>
+      <input type="submit" value="Attend" id="attendDialog" data-seg={event.segment}/>
+      <script type="application/javascript">
+        /* <![CDATA[ */
+        $('#attendDialog').click(function() {
+          var username = prompt('Twitter username?');
+          $.get('/event/' + $(this).attr('data-seg') + '/attend/' + username, function() {
+            top.location = top.location;
+          });
+        });
+      /* ]]> */
+      </script>
+    </div>
+    <p>Event goes here </p>
   }
 
   def createEventForm(params: Map[String, Seq[String]]) = {
@@ -100,11 +200,15 @@ class RSVP extends unfiltered.filter.Plan {
       <head>
         <title>RSVP!</title>
         <link rel="stylesheet" type="text/css" href="/assets/css/app.css"/>
+        <script type="application/javascript" src="http://ajax.googleapis.com/ajax/libs/jquery/1.4.2/jquery.min.js"/>
       </head>
       <body>
+       <header><h1>RSVP!</h1></header>
        <div id="container">
-       { body }
+         { body }
+         <a href="/event" class="medium">Create new event</a>
        </div>
+       <footer>Copyleft (c) 2011</footer>
      </body>
     </html>
    )
