@@ -32,7 +32,7 @@ case class Logger(logClass:Class[_]) {
   def debug(message:String) { log(message) }
   def info(message:String)  { log(message) }
 }
-case class Attendee(name:String, createdAt:String = new Date().toString)
+case class Attendee(eventId: String, name:String, createdAt:String = new Date().toString)
 case class Event(title: String, date: String, location: String, host: String, description: Option[String]) {
   val id = title.toLowerCase.replaceAll("[^\\w]+", "-")
 }
@@ -55,6 +55,7 @@ object DB {
     def name = column[String]("NAME")
     def createdAt = column[String]("CREATED_AT")
     def * = eventId ~ name ~ createdAt
+    def asAttendee = eventId ~ name ~ createdAt <> (Attendee.apply _, Attendee.unapply _)
   }
 
   val conn = Database.forURL("jdbc:h2:mem:test1;DB_CLOSE_DELAY=-1", driver = "org.h2.Driver")
@@ -77,12 +78,17 @@ object DB {
     event
   }
 
-  def save(eventId: String, attendee:Attendee):Attendee = {
-    conn withSession Attendees.insert(eventId, attendee.name, attendee.createdAt)
+  def save(attendee:Attendee):Attendee = {
+    conn withSession Attendees.insert(attendee.eventId, attendee.name, attendee.createdAt)
     attendee
   }
 
   def allEvents = conn withSession Events.map(_.asEvent).list
+
+  def allAttendees(eventId: String) =
+    conn withSession {
+      for (a <- Attendees.map(_.asAttendee).list if a.eventId == eventId) yield a
+    }
 }
 
 /** unfiltered plan */
@@ -106,7 +112,7 @@ class RSVP extends unfiltered.filter.Plan {
     case GET(Path(Seg("event" :: slug :: "attend" :: attendeeName :: Nil))) =>
       DB.eventBy(slug) match {
         case Some(event) =>
-          DB.save(slug, Attendee(attendeeName))
+          DB.save(Attendee(slug, attendeeName))
           Ok
         case None => NotFound
       }
@@ -169,7 +175,7 @@ class RSVP extends unfiltered.filter.Plan {
       <span class="host">{event.host}</span>
       <p>{event.description.getOrElse("No description yet…")}</p>
       <ul class="attendees">
-        {/*event.attendees.map { a => <li>{a.name} @ {a.createdAt}</li> }*/}
+        { DB.allAttendees(event.id) map { a => <li>{a.name} @ {a.createdAt}</li> } }
       </ul>
       <input type="submit" value="Attend" id="attendDialog" data-seg={event.id}/>
       <script type="application/javascript">
