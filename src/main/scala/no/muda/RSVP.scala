@@ -12,6 +12,20 @@ import org.scalaquery.session.Database
 import org.scalaquery.ql.extended.ExtendedTable
 
 import java.util.Date
+import java.net.URL
+
+object Server {
+  val logger = Logger(Server.getClass)
+  def main(args: Array[String]) {
+    val http = unfiltered.jetty.Http.anylocal // this will not be necessary in 0.4.0
+    http.context("/assets") { _.resources(new URL(getClass().getResource("/www/css"), ".")) }
+      .filter(new RSVP).run({ svr =>
+        unfiltered.util.Browser.open(http.url)
+      }, { svr =>
+        logger.info("shutting down server")
+      })
+  }
+}
 
 case class Logger(logClass:Class[_]) {
   def log(message:String)   { println( logClass.getName + ": " + message ) }
@@ -19,8 +33,8 @@ case class Logger(logClass:Class[_]) {
   def info(message:String)  { log(message) }
 }
 case class Attendee(name:String, createdAt:String = new Date().toString)
-case class Event(title: String, date: String, location: String, host: String, description: Option[String], attendees:List[Attendee] = List()) {
-  def segment = title.toLowerCase.replaceAll("[^\\w]+", "-")
+case class Event(title: String, date: String, location: String, host: String, description: Option[String]) {
+  val id = title.toLowerCase.replaceAll("[^\\w]+", "-")
 }
 
 /** unfiltered plan */
@@ -33,8 +47,9 @@ class RSVP extends unfiltered.filter.Plan {
     def location = column[String]("LOCATION")
     def date = column[String]("DATE")
     def host = column[String]("HOST")
-    def description = column[String]("DESCRIPTION", O.Nullable)
-    def * = id ~ title ~ location ~ date ~ host ~ description
+    def description = column[Option[String]]("DESCRIPTION")
+    def * = id ~ title ~ date ~ location ~ host ~ description
+    def asEvent = title ~ date ~ location ~ host ~ description <> (Event.apply _, Event.unapply _)
   }
 
   val Attendees = new ExtendedTable[(String, String, String)]("ATTENDEES") {
@@ -56,13 +71,6 @@ class RSVP extends unfiltered.filter.Plan {
     Attendees.insert("scalaonaboat", "olecr", "2012-sdfdg")
   }
 
-  var events = List[Event](
-    Event("ScalaOnABoat", "2011-fjdskfjdsk", "Boat", "Arktekk", None),
-    Event("into {} 'Clojure", "2011-fjdskfjdsk", "Sentrum", "sociallyfunctional", None),
-    Event("JavaZoen", "2012-fdjkfjds", "Spectrum", "javaBin", None),
-    Event("NDC", "2012-fdjkfjds", "Spectrum", "M$", None)
-  )
-
   val logger = Logger(classOf[RSVP])
 
   def intent = {
@@ -72,19 +80,32 @@ class RSVP extends unfiltered.filter.Plan {
 
     case GET(Path(Seg("event" :: slug :: Nil))) =>
       logger.debug("GET /event/" + slug )
-      events.find(e => e.segment == slug) match {
-        case Some(event) => Ok ~> layout(<h2>Showing event!?</h2> ++ showEvent(event))
-        case None        => NotFound ~> layout(<xml:group><h2>Event not Found!</h2><p>Is the URL correct?</p></xml:group>)
+      DB.withSession {
+        val m: List[Event] = for {
+          e <- Events.map(_.asEvent).list if e.id == slug
+        } yield e
+
+        m.headOption match {
+          case Some(event) => Ok ~> layout(<h2>Showing event!?</h2> ++ showEvent(event))
+          case None => NotFound ~> layout(<xml:group>
+            <h2>Event not Found!</h2> <p>Is the URL correct?</p>
+          </xml:group>)
+        }
       }
 
     case GET(Path(Seg("event" :: slug :: "attend" :: attendeeName :: Nil))) =>
-      events = events.map { event =>
-        if (event.segment == slug)
-          event.copy(attendees = Attendee(attendeeName) :: event.attendees)
-        else
-          event
+      DB.withSession {
+        val m: List[Event] = for {
+          e <- Events.map(_.asEvent).list if e.id == slug
+        } yield e
+
+        m.headOption match {
+          case Some(event) =>
+            Attendees.insert(event.id, attendeeName, new Date().toString)
+            Ok
+          case None => NotFound
+        }
       }
-      Ok
 
     case POST(Path(p @ "/event") & Params(params)) =>
       logger.debug("POST %s" format p)
@@ -113,8 +134,11 @@ class RSVP extends unfiltered.filter.Plan {
 
       } yield {
         val event = Event(title.get, date.get, location.get, host.get, description)
-        events ::= event
-        Redirect("/event/" + event.segment)
+        DB.withSession {
+          Events.insert(event.id, event.title, event.date, event.location, event.host, event.description)
+        }
+
+        Redirect("/event/" + event.id)
       }
       expected(params) orFail { fails =>
         viewWithParams(<ul class="error"> { fails.map { f => <li>{f.error}</li> } } </ul>)
@@ -129,14 +153,12 @@ class RSVP extends unfiltered.filter.Plan {
   def showEventList = {
     <ul>{
       DB.withSession {
-        val query: Query[Projection2[String, String]] = for {
-          e <- Events
-        } yield e.id ~ e.title
-
-        for (e <- query.list) yield {
+        for {
+          e <- Events.map(_.asEvent).list
+        } yield {
             <li>
-              <a href={"/event/" + e._1}>
-                {e._2}
+              <a href={"/event/" + e.id}>
+                {e.title}
               </a>
             </li>
         }
@@ -153,9 +175,9 @@ class RSVP extends unfiltered.filter.Plan {
       <span class="host">{event.host}</span>
       <p>{event.description.getOrElse("No description yet…")}</p>
       <ul class="attendees">
-        {event.attendees.map { a => <li>{a.name} @ {a.createdAt}</li> }}
+        {/*event.attendees.map { a => <li>{a.name} @ {a.createdAt}</li> }*/}
       </ul>
-      <input type="submit" value="Attend" id="attendDialog" data-seg={event.segment}/>
+      <input type="submit" value="Attend" id="attendDialog" data-seg={event.id}/>
       <script type="application/javascript">
         /* <![CDATA[ */
         $('#attendDialog').click(function() {
@@ -212,19 +234,5 @@ class RSVP extends unfiltered.filter.Plan {
      </body>
     </html>
    )
-  }
-}
-
-/** embedded server */
-object Server {
-  val logger = Logger(Server.getClass)
-  def main(args: Array[String]) {
-    val http = unfiltered.jetty.Http.anylocal // this will not be necessary in 0.4.0
-    http.context("/assets") { _.resources(new java.net.URL(getClass().getResource("/www/css"), ".")) }
-      .filter(new RSVP).run({ svr =>
-        unfiltered.util.Browser.open(http.url)
-      }, { svr =>
-        logger.info("shutting down server")
-      })
   }
 }
