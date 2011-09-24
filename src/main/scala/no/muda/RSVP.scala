@@ -39,7 +39,40 @@ case class Event(title: String, date: String, location: String, host: String, de
 
 object DB {
 
-  val Events = new ExtendedTable[(String, String, String, String, String, Option[String])]("EVENTS") {
+  def eventBy(slug: String): Option[Event] =
+    db withSession (for (t <- Events if t.id === slug) yield t.asEvent).list.headOption
+
+  def save(event: Event): Event = {
+    db withSession Events.insert(event.id, event.title, event.date, event.location, event.host, event.description)
+    event
+  }
+
+  def save(attendee: Attendee): Attendee = {
+    db withSession Attendees.insert(attendee.eventId, attendee.name, attendee.createdAt)
+    attendee
+  }
+
+  def allEvents: List[Event] =
+    db withSession Events.map(_.asEvent).list
+
+  def allAttendees(eventId: String): List[Attendee] =
+    db withSession (for (t <- Attendees if t.eventId === eventId) yield t.asAttendee).list
+
+  // SETUP
+
+  db.withSession {
+    (Events.ddl ++ Attendees.ddl).create
+    Events.insertAll(
+      ("scalaonaboat", "ScalaOnABoat", "2011-fjdskfjdsk", "Boat", "Arktekk", None),
+      ("into-clojure", "into {} 'Clojure", "2011-fjdskfjdsk", "Sentrum", "sociallyfunctional", None),
+      ("javazoen", "JavaZoen", "2012-fdjkfjds", "Spectrum", "javaBin", None)
+    )
+    Attendees.insert("scalaonaboat", "olecr", "2012-sdfdg")
+  }
+
+  // TABLES
+
+  private val Events = new ExtendedTable[(String, String, String, String, String, Option[String])]("EVENTS") {
     def id = column[String]("ID", O.PrimaryKey)
     def title = column[String]("TITLE")
     def location = column[String]("LOCATION")
@@ -50,7 +83,7 @@ object DB {
     def asEvent = title ~ date ~ location ~ host ~ description <> (Event.apply _, Event.unapply _)
   }
 
-  val Attendees = new ExtendedTable[(String, String, String)]("ATTENDEES") {
+  private val Attendees = new ExtendedTable[(String, String, String)]("ATTENDEES") {
     def eventId = column[String]("EVENT_ID")
     def name = column[String]("NAME")
     def createdAt = column[String]("CREATED_AT")
@@ -58,37 +91,10 @@ object DB {
     def asAttendee = eventId ~ name ~ createdAt <> (Attendee.apply _, Attendee.unapply _)
   }
 
-  val conn = Database.forURL("jdbc:h2:mem:test1;DB_CLOSE_DELAY=-1", driver = "org.h2.Driver")
+  // CONNECTION
 
-  conn.withSession {
-    (Events.ddl ++ Attendees.ddl).create
-    Events.insertAll(
-      ("scalaonaboat",  "ScalaOnABoat",     "2011-fjdskfjdsk", "Boat",     "Arktekk", None),
-      ("into-clojure",  "into {} 'Clojure", "2011-fjdskfjdsk", "Sentrum",  "sociallyfunctional", None),
-      ("javazoen",      "JavaZoen",         "2012-fdjkfjds",   "Spectrum", "javaBin", None)
-    )
-    Attendees.insert("scalaonaboat", "olecr", "2012-sdfdg")
-  }
+  private val db = Database.forURL("jdbc:h2:mem:test1;DB_CLOSE_DELAY=-1", driver = "org.h2.Driver")
 
-  def eventBy(slug: String) =
-    conn withSession (for (e <- Events.map(_.asEvent).list if e.id == slug) yield e).headOption
-
-  def save(event: Event): Event = {
-    conn withSession Events.insert(event.id, event.title, event.date, event.location, event.host, event.description)
-    event
-  }
-
-  def save(attendee:Attendee):Attendee = {
-    conn withSession Attendees.insert(attendee.eventId, attendee.name, attendee.createdAt)
-    attendee
-  }
-
-  def allEvents = conn withSession Events.map(_.asEvent).list
-
-  def allAttendees(eventId: String) =
-    conn withSession {
-      for (a <- Attendees.map(_.asAttendee).list if a.eventId == eventId) yield a
-    }
 }
 
 /** unfiltered plan */
