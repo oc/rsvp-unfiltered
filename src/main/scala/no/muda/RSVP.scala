@@ -37,9 +37,7 @@ case class Event(title: String, date: String, location: String, host: String, de
   val id = title.toLowerCase.replaceAll("[^\\w]+", "-")
 }
 
-/** unfiltered plan */
-class RSVP extends unfiltered.filter.Plan {
-  import QParams._
+object DB {
 
   val Events = new ExtendedTable[(String, String, String, String, String, Option[String])]("EVENTS") {
     def id = column[String]("ID", O.PrimaryKey)
@@ -59,9 +57,9 @@ class RSVP extends unfiltered.filter.Plan {
     def * = eventId ~ name ~ createdAt
   }
 
-  val DB = Database.forURL("jdbc:h2:mem:test1;DB_CLOSE_DELAY=-1", driver = "org.h2.Driver")
+  val conn = Database.forURL("jdbc:h2:mem:test1;DB_CLOSE_DELAY=-1", driver = "org.h2.Driver")
 
-  DB.withSession {
+  conn.withSession {
     (Events.ddl ++ Attendees.ddl).create
     Events.insertAll(
       ("scalaonaboat",  "ScalaOnABoat",     "2011-fjdskfjdsk", "Boat",     "Arktekk", None),
@@ -71,40 +69,46 @@ class RSVP extends unfiltered.filter.Plan {
     Attendees.insert("scalaonaboat", "olecr", "2012-sdfdg")
   }
 
+  def eventBy(slug: String) =
+    conn withSession (for (e <- Events.map(_.asEvent).list if e.id == slug) yield e).headOption
+
+  def save(event: Event): Event = {
+    conn withSession Events.insert(event.id, event.title, event.date, event.location, event.host, event.description)
+    event
+  }
+
+  def save(eventId: String, attendee:Attendee):Attendee = {
+    conn withSession Attendees.insert(eventId, attendee.name, attendee.createdAt)
+    attendee
+  }
+
+  def allEvents = conn withSession Events.map(_.asEvent).list
+}
+
+/** unfiltered plan */
+class RSVP extends unfiltered.filter.Plan {
+  import QParams._
+
   val logger = Logger(classOf[RSVP])
 
   def intent = {
     case GET(Path(p @ "/event")) =>
-      logger.debug("GET %s" format p)
       Ok ~> layout(<h2>New Event!?</h2> ++ createEventForm(Map.empty))
 
     case GET(Path(Seg("event" :: slug :: Nil))) =>
-      logger.debug("GET /event/" + slug )
-      DB.withSession {
-        val m: List[Event] = for {
-          e <- Events.map(_.asEvent).list if e.id == slug
-        } yield e
-
-        m.headOption match {
-          case Some(event) => Ok ~> layout(<h2>Showing event!?</h2> ++ showEvent(event))
-          case None => NotFound ~> layout(<xml:group>
-            <h2>Event not Found!</h2> <p>Is the URL correct?</p>
-          </xml:group>)
-        }
+      DB.eventBy(slug) match {
+        case Some(event) => Ok ~> layout(<h2>Showing event!?</h2> ++ showEvent(event))
+        case None => NotFound ~> layout(<xml:group>
+          <h2>Event not Found!</h2> <p>Is the URL correct?</p>
+        </xml:group>)
       }
 
     case GET(Path(Seg("event" :: slug :: "attend" :: attendeeName :: Nil))) =>
-      DB.withSession {
-        val m: List[Event] = for {
-          e <- Events.map(_.asEvent).list if e.id == slug
-        } yield e
-
-        m.headOption match {
-          case Some(event) =>
-            Attendees.insert(event.id, attendeeName, new Date().toString)
-            Ok
-          case None => NotFound
-        }
+      DB.eventBy(slug) match {
+        case Some(event) =>
+          DB.save(slug, Attendee(attendeeName))
+          Ok
+        case None => NotFound
       }
 
     case POST(Path(p @ "/event") & Params(params)) =>
@@ -133,10 +137,7 @@ class RSVP extends unfiltered.filter.Plan {
         description <- lookup("eventDescription")
 
       } yield {
-        val event = Event(title.get, date.get, location.get, host.get, description)
-        DB.withSession {
-          Events.insert(event.id, event.title, event.date, event.location, event.host, event.description)
-        }
+        val event = DB.save(Event(title.get, date.get, location.get, host.get, description))
 
         Redirect("/event/" + event.id)
       }
@@ -151,19 +152,12 @@ class RSVP extends unfiltered.filter.Plan {
   def validDate(s: String) = s matches """\d{4}-\d{2}-\d{2} \d{2}:\d{2}"""
 
   def showEventList = {
-    <ul>{
-      DB.withSession {
-        for {
-          e <- Events.map(_.asEvent).list
-        } yield {
-            <li>
-              <a href={"/event/" + e.id}>
-                {e.title}
-              </a>
-            </li>
-        }
-      }
-    }
+    <ul>{DB.allEvents.map { e =>
+        <li>
+          <a href={"/event/" + e.id}>
+            {e.title}
+          </a>
+        </li>}}
     </ul>
   }
 
